@@ -100,7 +100,9 @@ export const DEFAULT_CONFIG = {
   //   - `owner`  : the bound human owner for this org (set on first DM
   //                under dmPolicy=owner). An empty `owner.member_id`
   //                means "not yet bound" — the next sender auto-binds.
-  //   - `access` : lark-style access policy.
+  //   - `access` : lark-style access policy (see DEFAULT_ORG_ACCESS).
+  //                Omitted fields are backfilled from DEFAULT_ORG_ACCESS at
+  //                load time, so a minimal org block only needs org_id.
   orgs: {
     // 'default': {
     //   enabled:  true,
@@ -108,18 +110,7 @@ export const DEFAULT_CONFIG = {
     //   org_name: '',                       // display only
     //   self:  { member_id: '', name: 'Zylos' },  // agent's member id + display name in this org
     //   owner: { member_id: '', name: '' },        // bound human owner (empty = unbound)
-    //   access: {
-    //     dmPolicy:    'owner',             // 'open' | 'allowlist' | 'owner'
-    //     dmAllowFrom: [],
-    //     groupPolicy: 'allowlist',         // 'open' | 'allowlist' | 'disabled'
-    //     groups: {
-    //       // '<conv-uuid>': {
-    //       //   name:      '',
-    //       //   mode:      'mention',      // 'mention' | 'smart'
-    //       //   allowFrom: ['*'],
-    //       // }
-    //     },
-    //   },
+    //   access: { ... },                    // defaults from DEFAULT_ORG_ACCESS when omitted
     // },
   },
 
@@ -136,6 +127,18 @@ export const DEFAULT_CONFIG = {
   // the coco-workspace skill and run its task flow before handling (enforcement
   // L1, see SKILL_FLOW_DIRECTIVE in src/lib/message.js). Set to false to suppress
   // the injected directive (e.g. a bot that never runs the coco-workspace skill).
+};
+
+/**
+ * Default access policy applied to every org block that omits `access`
+ * (or individual fields within it). Ensures new orgs get safe defaults
+ * without requiring the operator to spell them out in config.json.
+ */
+export const DEFAULT_ORG_ACCESS = {
+  dmPolicy:    'owner',
+  dmAllowFrom: [],
+  groupPolicy: 'allowlist',
+  groups:      {},
 };
 
 let currentConfig = null;
@@ -173,6 +176,8 @@ export function loadConfig() {
 
 /**
  * Return [{ slug, ...orgConfig }] for every org with `enabled: true`.
+ * Missing `access` fields are backfilled from DEFAULT_ORG_ACCESS so
+ * a minimal org block (just org_id) gets safe defaults automatically.
  */
 export function enabledOrgs() {
   const cfg = loadConfig();
@@ -180,19 +185,23 @@ export function enabledOrgs() {
   for (const [slug, org] of Object.entries(cfg.orgs || {})) {
     if (org?.enabled === false) continue;
     if (!org?.org_id) continue;
-    out.push({ slug, ...org });
+    const access = { ...DEFAULT_ORG_ACCESS, ...org.access };
+    out.push({ slug, ...org, access });
   }
   return out;
 }
 
 /**
  * Find org config by its COCO org UUID. Returns { slug, ...orgConfig } or null.
+ * Access defaults are backfilled (same as enabledOrgs).
  */
 export function getOrgByOrgId(orgId) {
   if (!orgId) return null;
   const cfg = loadConfig();
   for (const [slug, org] of Object.entries(cfg.orgs || {})) {
-    if (org?.org_id === orgId) return { slug, ...org };
+    if (org?.org_id !== orgId) continue;
+    const access = { ...DEFAULT_ORG_ACCESS, ...org.access };
+    return { slug, ...org, access };
   }
   return null;
 }

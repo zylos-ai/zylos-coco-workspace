@@ -924,6 +924,10 @@ function handleConfigUpdate(orgConfig, frame) {
       return;
   }
 
+  // After applying the config change locally, push to cws-comm immediately
+  // so the server stays in sync without waiting for the 5-min periodic timer.
+  syncConfigToComm(orgConfig).catch(e =>
+    warn(`[${slug}] post-update config-sync failed: ${e.message}`));
 }
 
 // =============================================================================

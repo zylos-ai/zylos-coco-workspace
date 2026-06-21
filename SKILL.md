@@ -1,6 +1,6 @@
 ---
 name: coco-workspace
-version: 1.0.47
+version: 1.0.48
 description: >-
   COCO Workspace 任务代理 (Guided Autonomy)。凡通过 coco-workspace 收到的用户消息，
   处理任务前必须先加载并遵守本 skill：先判断是任务还是问话/闲聊；是任务则必须走完整流程——
@@ -148,7 +148,7 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.deliver` / 
 5. **实例化 Sub-task（Blueprint 通过后一次性建全部 Step）**：Blueprint 审批通过后，**必须一次性把全部 Step 实例化成 Task**——**严禁边做边补 / 做一个建一个**（那会让看板只看到零散的当前步骤，丢掉问题全景）。建 Task 时按 Blueprint 依赖关系设好 `dependsOn`，并**按"是否有未满足依赖"区分是否带 assignee**：
    - **无依赖、可立即开跑的 Step → 创建时带 `assigneeId`**（指定执行 bot）→ 自动分配给该 bot（**assigned，已分配但未开工**）；该执行 bot 随即 `task.start` 才进「进行中」真开跑
    - **有依赖的 Step → 创建时不带 `assigneeId`** → 停在「待办」(pending)；其指定执行 bot 记在 **Blueprint step（规划层）**，**先不写进 `task.assigneeId`**，等真被认领时才落到 task 上
-   - 各 Step 的执行 bot 仍**按技能匹配给出推荐、由发起人确认 / 选择**，不自行拍板（用 `core.agent_profiles` 拉候选画像作为推荐依据）
+   - **给 Step 选执行 bot 前，必须先读能力画像做匹配（强制，不可按名字/顺序拍脑袋）**：把任何 Step 落到某个 bot 之前，**必须先调一次 `core.agent_profiles({projectId, capabilities:true})`**，取回候选 agent 的 skills（自报）+ tags（人工标注）+ 描述 + online_status；然后**逐个 Step 把"这一步需要什么能力"和各 agent 的 tag/skill 语义匹配**，分配方案里**对每个 Step 写明"依据 TA 的哪个 tag/skill 把这步给 TA"**。**严禁**不读画像、按成员列表顺序 / 名字 / member_id 顺序直接指派——那是破窗（等于能力画像形同虚设、谁排在前面谁干第一件）。匹配出的仍是**推荐**，最终**由发起人确认 / 选择**；确无合适专长才推荐 COCO 自己做。
 6. **依赖驱动的 bot 自认领推进（状态=真实执行，看板全程可见全景）**：**「进行中」必须对应"真有 bot 在执行"**——后端不会、也不应擅自把待办改成进行中（否则状态是假的）。推进由 **bot 驱动**：
    - 无依赖 Step 已在「进行中」；有依赖 Step 在「待办」等待
    - **前置 bot 干完**（attempt→done、task→done）后，**通知下游 bot**（bot-DM，需双向 DM 权限，见跨 agent 沟通模式）「你的前置好了，去接 task X」→ **下游 bot 自己 `task.claim`**（分配给自己，assigned）→ 再 **`task.start`**（**依赖闸在这一步**：校验 `dependsOn`，前置都 done 才放行）→ 进「进行中」→ 执行。**v0.7 起 claim 与 start 分离：claim 只把活分给自己，start 才开工建 attempt、才查依赖**
@@ -343,6 +343,7 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 | REJECTED 直接回 EXECUTING | 必须走 `issue.reopen` 到 pending_start，再由 Lead `issue.start_execution` |
 | Heavy 模式跳过 Blueprint | 复杂任务必须先建 Blueprint；是否审批由 Lead/策略显式判断 |
 | 复杂任务绕过 Blueprint 直接拆 Task 开干（用 light / 无蓝图就实例化）| 复杂（多步/多 agent/有依赖）任务必须 heavy 模式 + 先建 Blueprint，再由 Lead/策略选择审批或直接启动，才能按 Step 实例化 Task |
+| 不读能力画像、按成员顺序/名字给 Step 派 bot | 派 bot 前**必须先 `core.agent_profiles({projectId,capabilities:true})`**，逐 Step 把任务需求和 agent 的 tag/skill 语义匹配，方案里写明每步选谁的依据；按顺序/名字拍脑袋＝能力画像形同虚设 |
 | Blueprint 通过后只建当前一步 Task、边做边补（piecemeal） | 一次性把全部 Step 建成 Task + 设 dependsOn；无依赖的带 assignee 进进行中、有依赖的不带 assignee 停待办，前置完成后下游 bot 自认领推进，看板呈现完整全景 |
 | 给有依赖的 Step 建 Task 时直接带 assigneeId | 有依赖的 Step 不带 assigneeId（否则后端创建即认领、顶成「进行中」，看板看不到待办）；指定执行人记在 Blueprint，前置完成后下游 bot 自己 claim |
 | 期待后端"前置 done 自动把待办变进行中" | 后端不自动改状态；由前置 bot 通知下游、下游 task.claim（分配）→ task.start（校验依赖）才进进行中——RUNNING 必须对应真在执行的 bot |

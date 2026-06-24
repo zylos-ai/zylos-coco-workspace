@@ -1208,7 +1208,7 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
     let hasMore = true;
 
     while (hasMore && totalSynced < SYNC_MAX_EVENTS) {
-      const res = await getForOrg(orgConfig.org_id, apiPath('/sync'), {
+      const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
         since_seq: sinceSeq,
         device_id: config.agent?.device_id || '',
         limit:     SYNC_PAGE_SIZE,
@@ -1262,7 +1262,7 @@ async function initSyncSeq(orgConfig, sessionRef) {
     let cursor = 0;
     let hasMore = true;
     while (hasMore) {
-      const res = await getForOrg(orgConfig.org_id, apiPath('/sync'), {
+      const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
         since_seq: cursor,
         device_id: config.agent?.device_id || '',
         limit:     SYNC_PAGE_SIZE,

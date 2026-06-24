@@ -1208,7 +1208,7 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
     let hasMore = true;
 
     while (hasMore && totalSynced < SYNC_MAX_EVENTS) {
-      const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
+      const res = await getForOrg(orgConfig.org_id, apiPath('/sync'), {
         since_seq: sinceSeq,
         device_id: config.agent?.device_id || '',
         limit:     SYNC_PAGE_SIZE,
@@ -1252,21 +1252,33 @@ async function syncMissedEvents(orgConfig, sessionRef, onMessage) {
 // =============================================================================
 // First-connect sync_seq initialization
 // =============================================================================
-// On first-ever connect (sync_seq=0), probe the sync API for the current
-// inbox position so subsequent reconnects have a valid starting cursor.
+// On first-ever connect (sync_seq=0), seek to the END of the inbox so
+// subsequent reconnects only catch up events that arrive after this point.
+// We page through the entire inbox (discarding events) to find the max
+// cursor — one-time cost per new bot, avoids pulling full history later.
 
 async function initSyncSeq(orgConfig, sessionRef) {
   try {
-    const res = await postForOrg(orgConfig.org_id, apiPath('/sync'), {
-      since_seq: 0,
-      device_id: config.agent?.device_id || '',
-      limit:     1,
-    });
-    const cursor = res?.next_cursor || res?.events?.[0]?.seq || 0;
+    let cursor = 0;
+    let hasMore = true;
+    while (hasMore) {
+      const res = await getForOrg(orgConfig.org_id, apiPath('/sync'), {
+        since_seq: cursor,
+        device_id: config.agent?.device_id || '',
+        limit:     SYNC_PAGE_SIZE,
+      });
+      const events = Array.isArray(res?.events) ? res.events : [];
+      hasMore = res?.has_more === true;
+      if (events.length > 0) {
+        cursor = Number(res?.next_cursor) || events[events.length - 1].seq;
+      } else {
+        break;
+      }
+    }
     if (cursor > 0) {
       sessionRef.sync_seq = cursor;
       saveOrgSession(orgConfig.slug, { org_id: orgConfig.org_id, sync_seq: cursor });
-      log(`[${orgConfig.slug}] init sync_seq=${cursor}`);
+      log(`[${orgConfig.slug}] init sync_seq=${cursor} (seeked to inbox end)`);
     }
   } catch (err) {
     warn(`[${orgConfig.slug}] initSyncSeq failed: ${err.message}`);

@@ -1610,7 +1610,7 @@ function shutdown(signal) {
   _isShuttingDown = true;
   log(`${signal}, shutting down...`);
   if (_frameMetricTimer) { clearInterval(_frameMetricTimer); _frameMetricTimer = null; }
-  if (_ownerSyncTimer) { clearInterval(_ownerSyncTimer); _ownerSyncTimer = null; }
+  if (_periodicSyncTimer) { clearInterval(_periodicSyncTimer); _periodicSyncTimer = null; }
   if (_typingPollTimer) { clearInterval(_typingPollTimer); _typingPollTimer = null; }
   // Remove all active processing-indicator reactions before exit.
   const removals = [];

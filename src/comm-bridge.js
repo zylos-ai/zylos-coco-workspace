@@ -646,11 +646,15 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         histText = '[image]' + (entryText ? ' ' + entryText : '');
       }
       ensureReplay(msg.conversation_id);
+      const historySenderName = msg.sender_display_name
+        || msg.sender?.display_name
+        || (await fetchMemberName(orgConfig.org_id, msg.sender_id))
+        || msg.sender_id;
       logAndRecord(msg.conversation_id, {
         timestamp: new Date().toISOString(),
         message_id: msg.id,
         sender_id: msg.sender_id,
-        sender_name: msg.sender_display_name || msg.sender_id,
+        sender_name: historySenderName,
         text: histText,
         seq: msg.seq != null ? Number(msg.seq) : null,
         parent_id: msg.parent_message_id || msg.message?.parent_id || null,
@@ -737,11 +741,16 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
             log(`context expanded (local): ${baseLimit} → ${ctx.length} msgs (${missingParentIds.size} missing parent(s))`);
           }
         }
-        // Convert local entries to the {senderName, content} format
+        // Convert local entries to the {senderName, content} format.
+        // Resolve sender names for entries stored with raw IDs (cold-start
+        // replay or entries recorded before this fix).
         const ctxSorted = [...ctx].sort((a, b) => (a.seq || 0) - (b.seq || 0));
-        recent = ctxSorted.map(e => ({
-          senderName: e.sender_name || e.sender_id,
-          content: e.text,
+        recent = await Promise.all(ctxSorted.map(async e => {
+          let name = e.sender_name;
+          if (!name || name === e.sender_id) {
+            name = (await fetchMemberName(orgConfig.org_id, e.sender_id)) || e.sender_id;
+          }
+          return { senderName: name, content: e.text };
         }));
       } else {
         // API path: ctx is an array of API message objects

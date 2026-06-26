@@ -36,6 +36,12 @@ import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './li
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
 import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
+import {
+  configure as configureDeliveryWatch,
+  onReactionEvent,
+  startPolling as startDeliveryWatchPolling,
+  stopPolling as stopDeliveryWatchPolling,
+} from './lib/delivery-watch.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'coco-workspace';
@@ -1219,6 +1225,7 @@ function classifySystemEvent(eventName) {
   const e = String(eventName || '').toLowerCase();
   if (e === 'message.recalled' || e === 'message.deleted') return 'recall';
   if (e === 'message.updated') return 'edit';
+  if (e === 'message.reaction.added') return 'reaction_added';
   if (e.startsWith('agent.config.')) return 'config_update';
   // Defensive fallback for naming drift — does not match reaction/read/etc.
   if (e.includes('recall') || e.includes('delete')) return 'recall';
@@ -1236,6 +1243,14 @@ async function handleSystemEvent(orgConfig, frame) {
 
   if (kind === 'config_update') {
     handleConfigUpdate(orgConfig, frame);
+    return;
+  }
+
+  if (kind === 'reaction_added') {
+    const data = payload.data || {};
+    if (onReactionEvent(data)) {
+      log(`[${orgConfig.slug}] delivery confirmed via reaction msg=${data.message_id}`);
+    }
     return;
   }
 
@@ -1794,6 +1809,7 @@ function shutdown(signal) {
   if (_frameMetricTimer) { clearInterval(_frameMetricTimer); _frameMetricTimer = null; }
   if (_periodicSyncTimer) { clearInterval(_periodicSyncTimer); _periodicSyncTimer = null; }
   if (_typingPollTimer) { clearInterval(_typingPollTimer); _typingPollTimer = null; }
+  stopDeliveryWatchPolling();
   // Remove all active processing-indicator reactions before exit.
   const removals = [];
   for (const [msgId, state] of activeReactions) {
@@ -1814,3 +1830,5 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 startFrameMetricTimer();
 startPeriodicSync();
+configureDeliveryWatch(config.message?.delivery_watch);
+startDeliveryWatchPolling();

@@ -52,6 +52,7 @@ import { uploadMedia } from '../src/cli/as.js';
 import { resolveMentions } from '../src/lib/mention.js';
 import { lookupConvOrg, registerConvOrg } from '../src/lib/conv-org.js';
 import { RUNTIME_DIR } from '../src/lib/session.js';
+import { writeMarker as writeDeliveryMarker } from '../src/lib/delivery-watch.js';
 
 const TYPING_DIR = path.join(RUNTIME_DIR, 'typing');
 
@@ -216,6 +217,12 @@ async function main() {
       ? await sendMediaMessage(ep, media.kind, media.localPath, media.caption)
       : await sendText(ep, message);
     markTypingDone(ep.replyTo || ep.conversationId);
+    const sentIds = result?.message_ids || [result?.id || result?.message_id].filter(Boolean);
+    const convId = resolveTargetConversation(ep);
+    const orgId = process.env.COCO_ORG_ID || '';
+    for (const mid of sentIds) {
+      if (mid) writeDeliveryMarker(String(mid), convId, orgId);
+    }
     console.log(JSON.stringify(result));
   } catch (e) {
     const payload = { error: e.message };

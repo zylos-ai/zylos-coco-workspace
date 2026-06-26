@@ -771,7 +771,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         const qAtt = Array.isArray(qStructured.attachments) ? qStructured.attachments[0] : null;
         const qMediaId = qAtt?.artifact_id || qStructured.media_id;
         if (!qText && (qIsImage || qMediaId)) {
-          qText = qIsImage ? '[image]' : `[file${qAtt?.file_name ? ': ' + qAtt.file_name : ''}]`;
+          qText = qIsImage ? `[image${qAtt?.file_name ? ': ' + qAtt.file_name : ''}]` : `[file${qAtt?.file_name ? ': ' + qAtt.file_name : ''}]`;
         }
         if (qMediaId) {
           try {
@@ -808,7 +808,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     const isFile = !isImage && !!mediaId;
     let displayContent = text;
     if (isImage) {
-      displayContent = `[image]${text ? ' ' + text : ''}`;
+      displayContent = `[image${mediaFileName ? ': ' + mediaFileName : ''}]${text ? ' ' + text : ''}`;
     } else if (isFile) {
       displayContent = `[file${mediaFileName ? ': ' + mediaFileName : ''}]${text ? ' ' + text : ''}`;
     }

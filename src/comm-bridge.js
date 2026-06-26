@@ -707,14 +707,16 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
 
       // Context source priority: memory → file replay → API fallback.
       // logAndRecord (above) already ensured replay + recorded this message.
+      // If local has data but fewer than baseLimit, fall back to API for a
+      // fuller window (e.g. right after deployment when history is thin).
       let localCtx = getHistory(msg.conversation_id, msg.id, baseLimit);
       let ctx;
       let source;
-      if (localCtx && localCtx.length > 0) {
+      if (localCtx && localCtx.length >= baseLimit) {
         source = 'local';
         ctx = localCtx;
       } else {
-        source = 'api';
+        source = localCtx && localCtx.length > 0 ? 'api+local' : 'api';
         const apiMsgs = await fetchRecentMessages(
           orgConfig.org_id,
           msg.conversation_id,

@@ -154,15 +154,20 @@ const COMMANDS = {
     apiPath(`/issues/${params.id}/activate`),
     { source: params.source ?? 'lead_chat' },
   ),
-  'issue.submit_plan': () => post(
-    apiPath(`/issues/${params.id}/submit-plan`),
-    {
-      plan_text:       params.planText ?? params.plan,
-      blueprint_id:    params.blueprintId,
-      source:          params.source ?? 'lead_chat',
-      card_message_id: params.cardMessageId,
-    },
-  ),
+  'issue.submit_plan': () => {
+    if (!params.blueprintId) {
+      throw new Error('issue.submit_plan requires blueprintId; create a one-step Blueprint for simple tasks');
+    }
+    return post(
+      apiPath(`/issues/${params.id}/submit-plan`),
+      {
+        plan_text:       params.planText ?? params.plan,
+        blueprint_id:    params.blueprintId,
+        source:          params.source ?? 'lead_chat',
+        card_message_id: params.cardMessageId,
+      },
+    );
+  },
   // Temporary text-card simulation: when a human replies "接受计划", Lead may
   // proxy that card click with source=text_card_proxy. Real interactive cards
   // should call the same endpoint as the human principal.
@@ -453,7 +458,7 @@ ISSUE  (all ✅ on contract-v2 — write paths use /issues/{id}, NOT /projects/{
                           disposition?}                                      # priority default medium; ownerMemberId defaults to human caller; agent create-by-human must pass it
   issue.update           {id, title?, description?, priority?}
   issue.activate         {id, source?}                                        # source: lead_chat|ui|event_binding|system
-  issue.submit_plan      {id, planText, blueprintId?, source?, cardMessageId?}
+  issue.submit_plan      {id, planText, blueprintId, source?, cardMessageId?}
   issue.accept_plan      {id, source?}                                        # default source=text_card_proxy
   issue.start_execution  {id}                                                 # legacy execution path
   issue.deliver          {id}

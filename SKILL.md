@@ -120,30 +120,31 @@ Worker **不该**做的:任何 issue 生命周期动作（如 `issue.submit_plan
 
 - **不是任务**（简单问答、闲聊、查询）→ 直接回答，不走下面的流程。
 - **是任务** → 下面两件事**必须立刻做、不得省略，且不因任务"简单"而豁免**：
-  1. **先登记 Issue→Task**：动手前先在 TM 建好 Issue→Task（需要时认领/指派）。这是整套流程被触发的前提——**跳过登记 ＝ 流程根本没启动**，是最常见的破窗。
+  1. **先登记 Issue→Blueprint→Task**：动手前先在 TM 建好 Issue 和 Blueprint，计划被人类接受后再按 Blueprint Step 建 Task（需要时认领/指派）。这是整套流程被触发的前提——**跳过登记 ＝ 流程根本没启动**，是最常见的破窗。
   2. **强制确认项目 + 知识库**：让用户确认/选择归属项目与产出知识库**之后**再执行，**禁止默默用默认 Inbox/默认 KB 直接开干**。
   做完这两步，再**自行判断简单 / 复杂任务**，**严格按对应流程**推进，不要跳步。
 - 选择执行的 bot 时，**不要自己直接拍板指派**：先用 `core.agent_profiles`（agent 能力画像：自报 skills + 人工标注 tags + 描述 + online_status）拉候选画像，据此给出推荐（附推荐理由），但**最终必须由发起人确认 / 选择**执行的 bot 再指派；无合适专长时可推荐 COCO 自己做，但同样要经发起人确认。画像里的 skill/tag 仅作语义参考，不做精确字符串匹配。
 - 任何环节不确定（任务归类、选哪个项目/知识库、指派哪个 agent、是否需要审批等）→ **先咨询用户**，不要擅自决定。
 
-判断简单/复杂的经验：单一产出、一个 agent 就能独立做完（如一份研究/分析报告）→ 简单任务；需要拆成多个有依赖关系的子任务、多个 agent 协作、或需要编排执行计划 → 复杂任务。拿不准就问用户。**注意：简单任务只是"执行/编排简单"，并不豁免登记 Task 和确认项目/KB——研究 / 分析报告这类最容易被误当成"顺手做"的，恰恰必须走全流程。**
+判断简单/复杂的经验：单一产出、一个 agent 就能独立做完（如一份研究/分析报告）→ 简单任务；需要拆成多个有依赖关系的子任务、多个 agent 协作、或需要编排执行计划 → 复杂任务。拿不准就问用户。**注意：简单任务只是"执行/编排简单"，并不豁免登记 Blueprint / Task 和确认项目/KB——研究 / 分析报告这类最容易被误当成"顺手做"的，恰恰必须走全流程。**
 
-> **复杂任务 = heavy 模式 + Blueprint（强制，不可绕过）。** 一旦判定为复杂任务（多步骤 / 多 agent 协作 / 子任务间有依赖 / 需要编排执行计划），就**必须**用 **heavy 模式**起 Issue，并**先生成 Blueprint（执行计划）**。Lead 把给人类看的 Markdown 计划通过 `issue.submit_plan` 提交,人类接受后文本卡片模拟期由 Lead 调 `issue.accept_plan {source:"text_card_proxy"}` 代点。v0.7 执行计划确认是 cws-work 内部流程,不走 cws-core Approval,不要调 `blueprint.submit_for_approval`。**严禁**用 light 模式把复杂任务直接拆成一堆 Task 就开干、跳过 Blueprint。light 模式只允许用于"单产出、单 agent"的简单任务。拿不准是简单还是复杂 → 问用户；只要沾到"多步骤/多 agent/有依赖" → 一律按复杂任务走 Blueprint。
+> **所有进入 Issue 的任务都必须有 Blueprint。** 简单任务是一个 step 的 Blueprint；复杂任务是多个 step / 依赖 / 多 Agent 的 Blueprint。Blueprint 是计划事实源，也是未来沉淀 workflow 的来源。Lead 把给人类看的 Markdown 计划通过 `issue.submit_plan` 提交，并带上 `blueprintId`；人类接受后文本卡片模拟期由 Lead 调 `issue.accept_plan {source:"text_card_proxy"}` 代点。v0.7 执行计划确认是 cws-work 内部流程，不走 cws-core Approval，不要调 `blueprint.submit_for_approval`。**严禁**跳过 Blueprint 直接拆 Task 开干。
 
 ### 简单任务流程（单 Agent 独立完成，例：研究报告）
 1. **接收用户意图**：解析消息，识别为简单研究/分析类需求
 2. **选择项目（必问，禁止默默决定，且必须在执行前）**：**先问用户**归属哪个项目再继续；可建议默认 Inbox，但必须经用户确认 / 选择，**绝不能跳过此步直接开干**
 3. **选择知识库（必问，禁止默默决定，且必须在执行前）**：**先问用户**产出沉淀到哪个知识库；可建议默认 KB，但同样必须经用户确认 / 选择
 4. **确认执行 Agent（必问，bot 不自行决定）**：用 `core.agent_profiles`（自报 skills + 人工 tags + 描述）拉候选 agent 能力画像，据此**给出推荐 + 理由**，把候选列给发起人，**由发起人确认 / 选择**执行的 bot；无匹配专长时可推荐 COCO 自己做，但仍需发起人确认
-5. **登记 Issue→Task（谁执行谁建 Task）**：Lead 在**已确认的项目**下创建 **Issue**（light），并把 `ownerMemberId` 设为发起任务的人类 member id（人类 caller 可省略默认自己，Agent 代人类创建必须显式传）。**description 用 Markdown 写**（标题、列表、加粗、代码块等；平台所有文本默认 markdown，无需额外 format 参数）。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue →（执行者）建 Task → 执行，不先开干再补
-6. **Agent 执行**：该 Agent 独立完成全部工作 → 产出结果
-7. **产物归档 & 知识沉淀**：产出 → ArtifactStore；报告沉淀到所选知识库（`/projects/.../research/`）
-8. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知该 Issue 的 owner 人类（通常就是任务发起人）请其验收**；创建 Issue 时必须让 `ownerMemberId` 指向发起人。**owner 验收通过**（IM 说「接受交付」或看板点验收）→ 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → Issue 进入 **accepted**，必要时再 `issue.archive`。owner **不接受**时不要先机械 reject；先继续对话理解问题,再 `issue.resume {reason:"..."}` 回到 **in_progress**,重新计划、必要时补 Blueprint step / Task,再 `issue.submit_plan` 给人类确认。交付到验收之间,issue 停在 **delivered（待验收）**，别当已完成丢着不管
+5. **登记 Issue + 单步 Blueprint**：Lead 在**已确认的项目**下创建 **Issue**（light），并把 `ownerMemberId` 设为发起任务的人类 member id（人类 caller 可省略默认自己，Agent 代人类创建必须显式传）。随后创建只有一个 step 的 Blueprint，step 描述就是这次简单任务的执行单元。**description 用 Markdown 写**（标题、列表、加粗、代码块等；平台所有文本默认 markdown，无需额外 format 参数）。
+6. **提交计划确认**：Lead 把人类可读的 Markdown 计划通过 `issue.submit_plan {blueprintId}` 提交；人类回复「接受计划」后，文本卡片模拟期由 Lead 调 `issue.accept_plan {source:"text_card_proxy"}`。计划说明写入 Issue comment，Blueprint 是计划事实源。
+7. **按 Blueprint Step 建 Task 并执行**：计划接受后，按这个单 step Blueprint 创建一个 Task。**Task 由执行者创建**——自己执行 → 自己 `task.create` 并认领；**派给别的 bot → 先开放 DM 权限（见跨 agent 沟通模式），再由那个 bot 自己在该 Issue 下 `task.create` 认领**，Lead 不替它建。严格顺序：确认项目/KB + 执行者 → 建 Issue → 建 Blueprint → `submit_plan` → 人类接受 →（执行者）建 Task → 执行，不先开干再补。
+8. **产物归档 & 知识沉淀**：产出 → ArtifactStore；报告沉淀到所选知识库（`/projects/.../research/`）
+9. **交付 & 人类验收闭环**：Task 全部 done → `issue.deliver` 到 **delivered**，并**主动通知该 Issue 的 owner 人类（通常就是任务发起人）请其验收**；创建 Issue 时必须让 `ownerMemberId` 指向发起人。**owner 验收通过**（IM 说「接受交付」或看板点验收）→ 文本卡片模拟期 Lead 调 `issue.accept_delivered {source:"text_card_proxy"}` → Issue 进入 **accepted**，必要时再 `issue.archive`。owner **不接受**时不要先机械 reject；先继续对话理解问题,再 `issue.resume {reason:"..."}` 回到 **in_progress**,重新计划、必要时补 Blueprint step / Task,再 `issue.submit_plan` 给人类确认。交付到验收之间,issue 停在 **delivered（待验收）**，别当已完成丢着不管
 
 ### 复杂任务流程（Lead Agent 编排 + 多 Agent 协作，例：开发任务）
 1. **接收用户意图**：Lead Agent 解析消息，识别为工作目标（非简单问答）
 2. **确认项目 + 知识库（必问，编排/执行前）**：查 DB 搜索关联 Project → 找到则问用户是否关联 / **未找到则让用户从已有项目里选**；**同时与用户确认产出沉淀的知识库**。**绝不隐式创建 Project**：哪怕用户消息里点了某个项目名、而你查不到同名项目，也**不要**自作主张建一个——**找不到就回过头问用户**（是指哪个已有项目，还是要新建）。**创建新项目只能在用户明确说"建一个新项目"时做**，且仍需确认名称。用户确认**项目 + KB 之后**才关联项目 / （仅在用户明确要求时）创建 Project + KB 空间（`/projects/{project-name}/`）并进入后续编排——**先确认项目/KB → 再执行，简单 / 复杂任务一致**，不要先开干再补
-3. **生成 Blueprint（强制，复杂任务的必经步骤）**：Lead Agent 拆解目标 → **必须**先生成 Blueprint（执行计划），定义所有 Step 及依赖关系（KB：`/jobs/{id}/blueprints/v1.md`）。**复杂任务一定要有 Blueprint——不允许跳过蓝图、直接拆 Task 开干。** 此步在实例化任何 Sub-task 之前完成
+3. **生成 Blueprint（强制，所有 Issue 都要有）**：Lead Agent 拆解目标 → **必须**先生成 Blueprint（执行计划），定义所有 Step 及依赖关系（KB：`/jobs/{id}/blueprints/v1.md`）。简单任务是一个 step；复杂任务是多个 step。**不允许跳过蓝图、直接拆 Task 开干。** 此步在实例化任何 Sub-task 之前完成
 4. **提交计划确认（统一入口，不分叉）**：Blueprint 编排好后，Lead 把人类可读的 Markdown 计划通过 `issue.submit_plan` 提交。人类回复「接受计划」后,文本卡片模拟期由 Lead 调 `issue.accept_plan {source:"text_card_proxy"}`。执行计划确认不走 cws-core Approval,不要调 `blueprint.submit_for_approval`。
 5. **实例化 Sub-task（计划接受后一次性建全部 Step）**：issue 进入 in_progress 后，**必须一次性把全部 Step 实例化成 Task**——**严禁边做边补 / 做一个建一个**。建 Task 时按 Blueprint 依赖关系设好 `dependsOn`，并**给每个 Step 都带 `assigneeId`**：
    - **`dependsOn` 必须使用上游 Task 的 `task.id`（强制）。** `dependsOn` 描述的是 Task→Task 依赖，调度中心的「依赖就绪」开工通知和 `task.start` 开工闸都按 `task.id` 匹配。所以**先建上游 Task、拿到它返回的 `task.id`，再用这个 id 设下游的 `dependsOn`**。用错 id 会让依赖边失效——下游 Task 收不到开工通知、过不了开工闸，无报错地永久卡在 assigned。
@@ -306,7 +307,7 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 
 以下是每个任务从开工到收尾的**硬性动作**，不是可选建议——靠自觉容易被省略，必须每次执行：
 
-1. **先安排再动手（每次处理都必须先创建 Task）**：每一次处理工作目标，**都必须先在 TM 里建好对应的 Task**（Issue → Task，需要时认领/指派）再开始执行——**没有「小事顺手做、不建 Task」的例外**（纯问答/闲聊除外）。安排即「把要做的事登记成 Task」，让进度可见、可流转、可验收；不要绕过 TM 直接埋头做。**这是「任务流程未被触发」的头号根因：收到任务直接开干、跳过 Issue→Task 登记——务必先登记再动手。**
+1. **先安排再动手（每次处理都必须先创建 Blueprint 和 Task）**：每一次处理工作目标，**都必须先在 TM 里建好对应的 Issue 和 Blueprint，计划被人类接受后再建 Task**（需要时认领/指派）再开始执行——**没有「小事顺手做、不建 Task / Blueprint」的例外**（纯问答/闲聊除外）。安排即「把要做的事登记成 Blueprint Step 和 Task」，让进度可见、可流转、可验收，也为未来 workflow 固化留下计划事实源；不要绕过 TM 直接埋头做。**这是「任务流程未被触发」的头号根因：收到任务直接开干、跳过 Issue→Blueprint→Task 登记——务必先登记再动手。**
 2. **项目/知识库选择必经（简单任务同样适用）**：执行任何「产出 deliverable 的用户任务」（研究 / 分析 / 开发等，**无论简单还是复杂**）前，**必须**让用户确认归属项目 + 产出 KB，不可默默用默认 Inbox/默认 KB。**不要因为任务"简单 / 一个 agent 就能做完"而跳过——简单研究 / 分析报告同样必须先问项目和 KB。** 唯一可跳过：用户已明确指定、纯查询/闲聊、或「内部 bug/问题登记」。**同理，执行任务的 bot 也必须经发起人确认**（可基于 agent 描述给推荐 + 理由），**不可自行拍板指派**。**绝不隐式创建 Project（强制）**：项目归属只能"选已有"或"用户明确要求时新建"。即便用户提到某个项目名而你查不到，也**禁止**擅自建同名项目兜底——**找不到就问用户**，弄错项目上下文会让后面建的 Issue/Task/产出全落到错地方、前功尽弃。`project.create` 仅在**人类明确指示新建**时才调。
 3. **状态流转即通知**：issue/task 每次状态变更（pending_start→pending_plan、pending_plan→in_progress、in_progress→delivered、task→done、delivered→accepted/archived 等）的**当下**就通知用户，不要事后补、更不要不说。
 4. **完成即通知**：每个任务执行完**必须**主动通知用户结果，不能默默做完、让结论埋进消息流。
@@ -317,7 +318,7 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
    - **方向②（你→worker）**：确认该 bot 的 `dmPolicy` 允许你给它发 DM——否则你的派发消息它收不到。
    - **两个方向都通了再派**；任一方向没开通，先解决或反馈给人类，**不要盲派**。
    (b) Lead 只建 **Issue** + 给目标，**Task 由被指派的 bot 自己 `task.create` 并认领**（谁执行谁建，Lead 不替它建）；(c) 收到它的完成回报后，Lead 才调 `issue.deliver` 并转交 Issue owner 验收。
-8. **复杂任务必须先有 Blueprint（强制）**：判定为复杂任务（多步骤 / 多 agent / 子任务有依赖 / 需编排）的，**必须** heavy 模式 → 先生成 Blueprint → `issue.submit_plan` 给人类确认 → `issue.accept_plan` 后再实例化 Task 执行。v0.7 执行计划确认不走 cws-core Approval,别调 `submit_for_approval`。顺序硬性：确认项目/KB → 起 heavy Issue → 建 Blueprint → `submit_plan` → 人类接受 → 按 Step 建 Task → 执行。
+8. **所有 Issue 必须先有 Blueprint（强制）**：简单任务也必须先生成单 step Blueprint；复杂任务生成多 step / 依赖 Blueprint。随后 `issue.submit_plan {blueprintId}` 给人类确认 → `issue.accept_plan` 后再实例化 Task 执行。v0.7 执行计划确认不走 cws-core Approval,别调 `submit_for_approval`。顺序硬性：确认项目/KB → 起 Issue → 建 Blueprint → `submit_plan` → 人类接受 → 按 Step 建 Task → 执行。
 9. **计划接受后一次性实例化全部 Step（强制）+ 每个 Step 都带 assignee、调度中心驱动推进**：`issue.accept_plan` 进入 in_progress 后**一次性把全部 Step 建成 Task、设 `dependsOn`、并给每个都带 `assigneeId`（含有依赖的）**，**禁止边做边补**。无依赖的 assignee 随即 `task.start` 进「进行中」；**有依赖的 assigned 停「待办」等前置，前置 done 后由调度中心 DM 其 assignee 通知开工 → assignee `task.start`（依赖闸在此校验）**进「进行中」。**不给下游 Step 设 assignee = 调度中心没人可通知 = 链断**。
 
 10. **提前终止善后（收到 `issue.terminated` 事件，Lead 专属）**：当一个未结论 Issue 被 `issue.terminate` 主动停下，系统已**机械收尾**（级联取消其下非终态 Task、叫停在跑 Attempt），并给 Lead 发 `issue.terminated` 事件。Lead 收到后按以下 SOP 善后，**不要闷头处理**：
@@ -339,12 +340,12 @@ Task 完成前，其下所有 Attempt 必须在终态。Issue 交付前，其下
 | 错误 | 正确做法 |
 |---|---|
 | 使用 Claude Code 内置 TaskCreate/TaskUpdate | 所有任务操作走 TM CLI，禁止用平台内置的 task 工具 |
-| 跳过 TM 流程直接执行任务 | 每个需求必须先 Issue → Task → Attempt 推进 |
+| 跳过 TM 流程直接执行任务 | 每个需求必须先 Issue → Blueprint → Task → Attempt 推进 |
 | Worker 调 issue 生命周期动作 | Issue 状态只由 Lead 流转；`issue.transition` 仅旧脚本兼容 shim，新流程用 `issue.submit_plan` / `issue.accept_plan` / `issue.deliver` / `issue.resume` / `issue.accept_delivered` 等语义命令 |
 | 创建 Issue 没有 leadAgentId | Issue 必须有 Lead |
 | 人类不接受后直接改产出 | 先继续对话理解反馈,再 `issue.resume` 回到 in_progress,重新计划并 `issue.submit_plan` |
-| Heavy 模式跳过 Blueprint | 复杂任务必须先建 Blueprint；建好后 `issue.submit_plan` 给人类确认 |
-| 复杂任务绕过 Blueprint 直接拆 Task 开干（用 light / 无蓝图就实例化）| 复杂（多步/多 agent/有依赖）任务必须 heavy 模式 + 先建 Blueprint，计划接受后才能按 Step 实例化 Task |
+| 简单任务跳过 Blueprint | 简单任务也必须先建一个 step 的 Blueprint；建好后 `issue.submit_plan {blueprintId}` 给人类确认 |
+| 复杂任务绕过 Blueprint 直接拆 Task 开干（用 light / 无蓝图就实例化）| 复杂（多步/多 agent/有依赖）任务必须先建多 step Blueprint，计划接受后才能按 Step 实例化 Task |
 | agent 自己判断「要不要审批」/ 调 `blueprint.submit_for_approval` | v0.7 执行计划确认不走 cws-core Approval：建好 Blueprint 一律 `issue.submit_plan` 给人类确认 |
 | 不读能力画像、按成员顺序/名字给 Step 派 bot | 派 bot 前**必须先 `core.agent_profiles({projectId,capabilities:true})`**，逐 Step 把任务需求和 agent 的 tag/skill 语义匹配，方案里写明每步选谁的依据；按顺序/名字拍脑袋＝能力画像形同虚设 |
 | Blueprint 通过后只建当前一步 Task、边做边补（piecemeal） | 一次性把全部 Step 建成 Task + 设 dependsOn + 每个都带 assignee；无依赖的进进行中、有依赖的 assigned 停待办，前置完成后调度中心通知其 assignee 开工，看板呈现完整全景 |

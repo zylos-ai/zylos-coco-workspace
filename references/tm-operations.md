@@ -1,14 +1,14 @@
 # TM 操作指南
 
-**作用**:管理 Task Management 服务的工作流——`Project → Issue → Task → Attempt` 四层资源,加 Blueprint(heavy 模式的编排骨架)。所有命令通过 cws-core BFF 落到 cws-work。
+**作用**:管理 Task Management 服务的工作流——`Project → Issue → Blueprint → Task → Attempt`。Blueprint 是计划事实源,简单任务也使用一个 step 的 Blueprint;复杂任务使用多 step / 依赖 Blueprint。所有命令通过 cws-core BFF 落到 cws-work。
 
 **何时加载本文档**:
 
-- 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,决定 `light`(单 Agent/无 Blueprint)还是 `heavy`(Blueprint 编排流),再由 Lead 判断是否需要审批
+- 收到人类的"新需求 / 帮我做这个"时,加载查 `issue.create` 入参,决定 `light`(单 Agent/单 step Blueprint)还是 `heavy`(多 step Blueprint 编排流),再创建 Blueprint 并走计划确认
 - 需要派 task 给别人或自己接活时,查 `task.create` / `task.claim` → `task.start`(接活两步:claim 分配、start 开工)
 - 需要提前停掉一个还没结论的 issue 时,查 `issue.terminate`(终止 + 善后)
 - 工作做完准备收尾时,查 `attempt.transition` → `task.transition` → `issue.deliver` → `accept_delivered` 的顺序;人类不接受时,不要先调 reject,先对话澄清后 `issue.resume`
-- Lead 编排 heavy issue 的步骤时,查整套 `blueprint.*`
+- Lead 编排任何 issue 的步骤时,查整套 `blueprint.*`;简单任务也先建一个 step 的 Blueprint
 - Worker 失败 / 阻塞要汇报时,查 `attempt.transition` 的 `failed` / `blocked` 选项
 
 **不在本文档范围**:
@@ -25,7 +25,7 @@
 - 给 task 配 `contextPageIds` 时,KB page id 先用 `kb.search` 拉到
 - Worker 调 `task.list?claimable=true` 找活之前,确保自己的 `skillTags` 已经登记到 member 资料
 
-> 完整的参数依赖树(`core.me → project.list → issue.create → task.create → ...`)见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)。本文档不重复,只补 TM 命令级细节。
+> 完整的参数依赖树(`core.me → project.list → issue.create → blueprint.create → issue.submit_plan → task.create → ...`)见 [`SKILL.md` 效率捷径 > 参数解析](../SKILL.md)。本文档不重复,只补 TM 命令级细节。
 
 ---
 
@@ -91,10 +91,10 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | --- | --- | --- | --- | --- |
 | ✅ | `issue.list_in_project` | 列项目内的 issue(可按状态 / 优先级过滤) | `{projectId, status?, priority?, page?, pageSize?, orderBy?}` | `GET /projects/{pid}/issues` |
 | ✅ | `issue.get` | 取单个 issue 详情 | `{id}` | `GET /issues/{id}` |
-| ✅ | `issue.create` | 起 issue;`mode=light` 表示无 Blueprint,`mode=heavy` 表示 Blueprint 编排;`disposition=backlog` 可先记录不执行;`ownerMemberId` 是交付验收归属 | `{projectId, title, mode, priority, leadAgentId, ownerMemberId?, description?, descriptionFormat?, disposition?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
+| ✅ | `issue.create` | 起 issue;`mode=light` 表示单 Agent / 单 step Blueprint,`mode=heavy` 表示多 step Blueprint 编排;`disposition=backlog` 可先记录不执行;`ownerMemberId` 是交付验收归属 | `{projectId, title, mode, priority, leadAgentId, ownerMemberId?, description?, descriptionFormat?, disposition?, dueDate?, contextPageIds?, inputArtifactIds?, originConversationId?, originMessageId?}` | `POST /projects/{pid}/issues` |
 | ✅ | `issue.update` | 改 issue 元数据(不动状态) | `{id, title?, description?, descriptionFormat?, priority?, dueDate?}` | `PATCH /issues/{id}` |
 | ✅ | `issue.activate` | backlog → pending_start;按 source 决定是否唤醒 Lead | `{id, source?}` | `POST /issues/{id}/activate` |
-| ✅ | `issue.submit_plan` | Lead 把执行计划提交给人类确认,写 Issue comment,状态 → pending_plan | `{id, planText, blueprintId?, source?, cardMessageId?}` | `POST /issues/{id}/submit-plan` |
+| ✅ | `issue.submit_plan` | Lead 把执行计划提交给人类确认,写 Issue comment,状态 → pending_plan;新流程必须带 `blueprintId` | `{id, planText, blueprintId, source?, cardMessageId?}` | `POST /issues/{id}/submit-plan` |
 | ✅ | `issue.accept_plan` | 人类接受执行计划;文本卡片模拟期由 Lead 代点,默认 `source=text_card_proxy`;状态 → in_progress | `{id, source?}` | `POST /issues/{id}/accept-plan` |
 | ✅ | `issue.start_execution` | 旧执行入口兼容: pending_start/draft/pending_plan → executing | `{id}` | `POST /issues/{id}/start-execution` |
 | ✅ | `issue.deliver` | in_progress/executing → delivered | `{id}` | `POST /issues/{id}/deliver` |
@@ -109,7 +109,7 @@ CLI 失败时往 stderr 输出 `{"error":"...","status":<httpStatus>}`,exit code
 | ✅ | `issue.set_acceptance` | 兼容 wrapper;新调用优先用 `accept_delivered` / `resume` | `{id, accepted, source?, rejectionReason?}` | `POST /issues/{id}/acceptance` — `source` 取 `im` / `explicit` / `text_card_proxy`(默认 `explicit`) |
 | ✅ | `issue.terminate` | 提前终止未结论 issue → terminated;服务端级联取消非终态 Task + 发 `issue.terminated` 事件给 Lead 善后(不回滚已发生副作用) | `{id, reason?, source?}` | `POST /issues/{id}/terminate` — `source` 默认 `lead_chat` |
 
-`mode` 取值:`light`(单 Agent/无 Blueprint)/ `heavy`(Blueprint 编排流)。`disposition` 取值:`start`(默认) / `backlog`。`ownerMemberId` 是 Issue 的验收 / 治理归属:人类调用可省略并默认自己;Agent 代人类创建时必须传**对话中那个人类的 member id**。文本卡片模拟期允许 Lead 使用 `source=text_card_proxy` 代人类点击 `accept_plan` / `accept_delivered`;代码中已把它标成临时路径,真实卡片上线后应由人类 principal 调同一语义接口。
+`mode` 取值:`light`(单 Agent / 单 step Blueprint)/ `heavy`(多 step Blueprint 编排流)。`disposition` 取值:`start`(默认) / `backlog`。`ownerMemberId` 是 Issue 的验收 / 治理归属:人类调用可省略并默认自己;Agent 代人类创建时必须传**对话中那个人类的 member id**。文本卡片模拟期允许 Lead 使用 `source=text_card_proxy` 代人类点击 `accept_plan` / `accept_delivered`;代码中已把它标成临时路径,真实卡片上线后应由人类 principal 调同一语义接口。
 
 ### Task (8 条)
 
@@ -186,13 +186,23 @@ node src/cli/tm.js issue.create '{
   "originConversationId":"conv-1","originMessageId":"msg-42"
 }'
 
-# 1.5) Lead 发执行计划文本卡片给人类确认;人类回复"接受计划"后,Lead 代点
-node src/cli/tm.js issue.submit_plan '{"id":"iss-1","planText":"1. 完成竞品定价分析\\n2. 输出结论到 KB","source":"lead_chat"}'
+# 1.5) 创建单 step Blueprint,作为计划事实源
+node src/cli/tm.js blueprint.create '{
+  "issueId":"iss-1",
+  "steps":[
+    {"temp_id":"s1","description":"完成竞品定价分析并输出结论到 KB"}
+  ],
+  "notes":"单 Agent 简单任务,一个 step 即可"
+}'
+
+# 1.6) Lead 发执行计划文本卡片给人类确认;人类回复"接受计划"后,Lead 代点
+node src/cli/tm.js issue.submit_plan '{"id":"iss-1","blueprintId":"bp-1","planText":"1. 完成竞品定价分析\\n2. 输出结论到 KB","source":"lead_chat"}'
 node src/cli/tm.js issue.accept_plan '{"id":"iss-1","source":"text_card_proxy"}'
 
-# 2) 创建 Task 并认领(自做时 contextPageIds 可省略,自己已读过)
+# 2) 按单 step Blueprint 创建 Task 并认领(自做时 contextPageIds 可省略,自己已读过)
 node src/cli/tm.js task.create '{
-  "projectId":"proj-1","issueId":"iss-1","title":"Implement","assigneeId":"agent-self"
+  "projectId":"proj-1","issueId":"iss-1","blueprintStepId":"step-1",
+  "title":"竞品定价分析","assigneeId":"agent-self"
 }'
 node src/cli/tm.js task.claim '{"id":"task-1"}'
 

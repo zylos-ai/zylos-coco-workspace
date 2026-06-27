@@ -35,6 +35,7 @@ import { getForOrg, postForOrg, putForOrg, delForOrg, apiPath } from './lib/clie
 import { getAccessToken, getWsTicket, invalidate as invalidateToken } from './lib/token.js';
 import fs from 'fs';
 import { loadOrgSession, saveOrgSession, RUNTIME_DIR } from './lib/session.js';
+import { logAndRecord, getHistory, ensureReplay, setLimits } from './lib/group-history.js';
 
 const LOG_PREFIX = '[comm-bridge]';
 const CHANNEL = 'coco-workspace';
@@ -43,6 +44,7 @@ const CHANNEL = 'coco-workspace';
 // may override either; if absent, these apply. Operator-edited config.json
 // files don't need to mention `message` at all.
 const DEFAULT_CONTEXT_MESSAGES = 5;
+const DEFAULT_CONTEXT_MAX_MESSAGES = 15;
 // (DEFAULT_DEDUP_TTL_MS removed — deduper is count-based, ttlMs was dead code)
 const DEFAULT_DEDUP_MAX_ENTRIES = 3000;
 
@@ -64,6 +66,10 @@ function log(...a)  { console.log(LOG_PREFIX, ...a); }
 function warn(...a) { console.warn(LOG_PREFIX, ...a); }
 
 let config = loadConfig();
+setLimits(
+  config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES,
+  config.message?.context_max_messages ?? DEFAULT_CONTEXT_MAX_MESSAGES,
+);
 // Persist the deduper's seen-id window to disk (runtime/dedup.json) so a
 // restart/reconnect catch-up re-pull is deduped by message_id. Retention is
 // count-based: keep the most recent `maxEntries` ids (default 3000, covering
@@ -618,6 +624,44 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     const conv = await fetchConversation(orgConfig.org_id, msg.conversation_id);
     if (conv) conv.id = conv.id || msg.conversation_id;
 
+    // Record every group message to local history (memory + file) BEFORE the
+    // policy filter, mirroring zylos-telegram's logAndRecord pattern. This
+    // ensures context is available even for messages the bot doesn't handle.
+    const earlyConvType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
+    if (earlyConvType !== 'dm') {
+      const structured = (msg.content && typeof msg.content === 'object') ? msg.content : {};
+      const entryText = structured.body?.text
+        || (typeof msg.message?.content === 'string' ? msg.message.content : '')
+        || (typeof msg.content === 'string' ? msg.content : '')
+        || '';
+      const msgType = (msg.type || msg.message?.type || '').toLowerCase();
+      const atts = Array.isArray(structured.attachments) ? structured.attachments : [];
+      const isImg = msgType === 'image' || msgType === 'agent_card';
+      let histText = entryText;
+      if ((isImg || atts.length > 0) && atts.length > 0) {
+        const kind = isImg ? 'image' : 'file';
+        const labels = atts.map(a => `[${kind}: ${a.artifact_id || '?'} | ${a.file_name || 'unknown'}]`);
+        histText = labels.join(' ') + (entryText ? ' ' + entryText : '');
+      } else if (isImg) {
+        histText = '[image]' + (entryText ? ' ' + entryText : '');
+      }
+      ensureReplay(msg.conversation_id);
+      const historySenderName = msg.sender_display_name
+        || msg.sender?.display_name
+        || (await fetchMemberName(orgConfig.org_id, msg.sender_id))
+        || msg.sender_id;
+      logAndRecord(msg.conversation_id, {
+        timestamp: new Date().toISOString(),
+        message_id: msg.id,
+        sender_id: msg.sender_id,
+        sender_name: historySenderName,
+        text: histText,
+        seq: msg.seq != null ? Number(msg.seq) : null,
+        parent_id: msg.parent_message_id || msg.message?.parent_id || null,
+        type: msgType || 'text',
+      });
+    }
+
     const decision = await shouldHandleMessage(msg, conv || {}, orgConfig);
     if (!decision.handle) {
       log(`drop [${orgConfig.slug}] msg=${msg.id}: ${decision.reason}`);
@@ -658,31 +702,118 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
     let recent = [];
     const convType = (conv?.type || '').toLowerCase() || (msg.thread_id ? 'thread' : 'dm');
     if (convType !== 'dm') {
-      const ctx = await fetchRecentMessages(
-        orgConfig.org_id,
-        msg.conversation_id,
-        msg.seq,
-        config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES,
-      );
-      // cws-comm list-messages with before_seq returns DESC (newest→oldest);
-      // sort ascending by seq so <group-context> reads chronologically
-      // (oldest→newest).
-      const ctxAsc = [...ctx].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
-      recent = await Promise.all(ctxAsc.map(async m => ({
-        // Resolve the sender's display name; fall back to the raw id only when
-        // cws-core gives us neither an inline name nor a resolvable member.
-        senderName: m.sender_display_name
-                 || m.senderName
-                 || (await fetchMemberName(orgConfig.org_id, m.sender_id))
-                 || m.sender_id,
-        // list-messages returns a flat string in `m.content` (the canonical
-        // top-level fallback_text); get-message instead returns a structured
-        // object at `m.content.body.text`. Cover both for forward-compat.
-        content:    m.content?.body?.text
-                 || (typeof m.content === 'string' ? m.content : '')
-                 || m.content_text
-                 || '',
-      })));
+      const baseLimit = config.message?.context_messages ?? DEFAULT_CONTEXT_MESSAGES;
+      const maxLimit = config.message?.context_max_messages ?? DEFAULT_CONTEXT_MAX_MESSAGES;
+
+      // Context source priority: memory → file replay → API fallback.
+      // logAndRecord (above) already ensured replay + recorded this message.
+      // If local has data but fewer than baseLimit, fall back to API for a
+      // fuller window (e.g. right after deployment when history is thin).
+      let localCtx = getHistory(msg.conversation_id, msg.id, baseLimit);
+      let ctx;
+      let source;
+      if (localCtx && localCtx.length >= baseLimit) {
+        source = 'local';
+        ctx = localCtx;
+      } else {
+        source = localCtx && localCtx.length > 0 ? 'api+local' : 'api';
+        const apiMsgs = await fetchRecentMessages(
+          orgConfig.org_id,
+          msg.conversation_id,
+          msg.seq,
+          baseLimit,
+        );
+        ctx = apiMsgs;
+      }
+
+      // Dynamic expansion: if context or the current message reference parent
+      // messages (replies) not in the window, expand to capture the reply chain.
+      if (source === 'local') {
+        const ctxByMsgId = new Set(ctx.map(e => e.message_id));
+        const missingParentIds = new Set();
+        const curParentId = msg.parent_message_id || msg.message?.parent_id;
+        if (curParentId && !ctxByMsgId.has(curParentId)) missingParentIds.add(curParentId);
+        for (const e of ctx) {
+          if (e.parent_id && !ctxByMsgId.has(e.parent_id)) missingParentIds.add(e.parent_id);
+        }
+        if (missingParentIds.size > 0 && ctx.length < maxLimit) {
+          const expanded = getHistory(msg.conversation_id, msg.id, maxLimit);
+          if (expanded && expanded.length > ctx.length) {
+            ctx = expanded;
+            log(`context expanded (local): ${baseLimit} → ${ctx.length} msgs (${missingParentIds.size} missing parent(s))`);
+          }
+        }
+        // Convert local entries to the {senderName, content} format.
+        // Resolve sender names for entries stored with raw IDs (cold-start
+        // replay or entries recorded before this fix).
+        const ctxSorted = [...ctx].sort((a, b) => (a.seq || 0) - (b.seq || 0));
+        recent = await Promise.all(ctxSorted.map(async e => {
+          let name = e.sender_name;
+          if (!name || name === e.sender_id) {
+            name = (await fetchMemberName(orgConfig.org_id, e.sender_id)) || e.sender_id;
+          }
+          return { senderName: name, content: e.text };
+        }));
+      } else {
+        // API path: ctx is an array of API message objects
+        const ctxById = new Map(ctx.map(m => [m.id, m]));
+        const missingParentIds = new Set();
+        const curParentId = msg.parent_message_id || msg.message?.parent_id;
+        if (curParentId && !ctxById.has(curParentId)) missingParentIds.add(curParentId);
+        for (const m of ctx) {
+          const pid = m.parent_id || m.parent_message_id;
+          if (pid && !ctxById.has(pid)) missingParentIds.add(pid);
+        }
+        if (missingParentIds.size > 0 && ctx.length < maxLimit) {
+          const expandCount = Math.min(maxLimit, baseLimit * 3) - ctx.length;
+          if (expandCount > 0) {
+            const oldestSeq = ctx.reduce((min, m) => Math.min(min, Number(m.seq) || Infinity), Infinity);
+            if (oldestSeq < Infinity) {
+              const extra = await fetchRecentMessages(
+                orgConfig.org_id,
+                msg.conversation_id,
+                oldestSeq,
+                expandCount,
+              );
+              for (const m of extra) {
+                if (!ctxById.has(m.id)) {
+                  ctxById.set(m.id, m);
+                  ctx.push(m);
+                }
+              }
+              log(`context expanded (api): ${baseLimit} → ${ctx.length} msgs (${missingParentIds.size} missing parent(s))`);
+            }
+          }
+        }
+
+        const ctxAsc = [...ctx].sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
+        recent = await Promise.all(ctxAsc.map(async m => {
+          const senderName = m.sender_display_name
+                   || m.senderName
+                   || (await fetchMemberName(orgConfig.org_id, m.sender_id))
+                   || m.sender_id;
+          const mStructured = (m.content && typeof m.content === 'object') ? m.content : {};
+          const text = mStructured.body?.text
+                   || (typeof m.content === 'string' ? m.content : '')
+                   || m.content_text
+                   || '';
+          const mType = (m.type || m.message?.type || '').toLowerCase();
+          const mAttachments = Array.isArray(mStructured.attachments) ? mStructured.attachments
+                             : Array.isArray(m.attachments) ? m.attachments : [];
+          const mIsImage = mType === 'image' || mType === 'agent_card';
+          const mIsFile = !mIsImage && (mType === 'file' || mAttachments.length > 0);
+          let content = text;
+          if ((mIsImage || mIsFile) && mAttachments.length > 0) {
+            const kind = mIsImage ? 'image' : 'file';
+            const labels = mAttachments.map(a => `[${kind}: ${a.artifact_id} | ${a.file_name || 'unknown'}]`);
+            content = labels.join(' ') + (text ? ' ' + text : '');
+          } else if (mIsImage) {
+            content = '[image]' + (text ? ' ' + text : '');
+          }
+          return { senderName, content };
+        }));
+      }
+      log(`context [${orgConfig.slug}] conv=${msg.conversation_id} source=${source} count=${recent.length}`);
     }
 
     // After `msg = { ...notification, ...detail }`, where detail is the
@@ -699,18 +830,31 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
      || (typeof msg.content === 'string' ? msg.content : '')
      || '';
 
-    let mediaLocalPath;
-    const firstAttachment = Array.isArray(structured.attachments) ? structured.attachments[0] : null;
-    // attachment shape per cws-core: {artifact_id, file_name, content_type, size_bytes}
-    const mediaId = firstAttachment?.artifact_id || structured.media_id; // structured.media_id kept as legacy fallback
-    const mediaFileName = firstAttachment?.file_name || structured.filename;
-    if (mediaId) {
-      try {
-        const { url } = await getMediaUrl(mediaId, orgConfig.org_id);
-        if (url) mediaLocalPath = await downloadMedia(url, mediaFileName || mediaId);
-      } catch (e) {
-        warn('media fetch failed:', e.message);
+    const allAttachments = Array.isArray(structured.attachments) ? structured.attachments : [];
+    // Legacy fallback: if no structured attachments, synthesize one from flat fields.
+    if (!allAttachments.length && (structured.media_id || structured.filename)) {
+      allAttachments.push({ artifact_id: structured.media_id, file_name: structured.filename });
+    }
+    const shouldDownload = allAttachments.length > 0 && (convType === 'dm' || decision.mentioned || decision.mode === 'smart');
+    const mediaItems = [];
+    for (const att of allAttachments) {
+      const attId = att.artifact_id;
+      if (!attId) continue;
+      const attFileName = att.file_name;
+      const item = { id: attId, fileName: attFileName };
+      if (shouldDownload) {
+        try {
+          const { url } = await getMediaUrl(attId, orgConfig.org_id);
+          if (url) {
+            const ext = attFileName ? path.extname(attFileName) : '';
+            const saveName = attId + ext;
+            item.localPath = await downloadMedia(url, saveName);
+          }
+        } catch (e) {
+          warn('media fetch failed:', attId, e.message);
+        }
       }
+      mediaItems.push(item);
     }
 
     // Prefer an inline display name from the message; otherwise resolve the
@@ -759,20 +903,31 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
         // the agent can actually READ the quoted media (not just know it exists).
         const qType = (q.message?.type || '').toLowerCase();
         const qIsImage = qType === 'image' || qType === 'agent_card';
-        const qAtt = Array.isArray(qStructured.attachments) ? qStructured.attachments[0] : null;
-        const qMediaId = qAtt?.artifact_id || qStructured.media_id;
-        if (!qText && (qIsImage || qMediaId)) {
-          qText = qIsImage ? '[image]' : `[file${qAtt?.file_name ? ': ' + qAtt.file_name : ''}]`;
+        const qAllAtts = Array.isArray(qStructured.attachments) ? qStructured.attachments : [];
+        if (!qAllAtts.length && qStructured.media_id) {
+          qAllAtts.push({ artifact_id: qStructured.media_id, file_name: qStructured.filename });
         }
-        if (qMediaId) {
+        const qKind = qIsImage ? 'image' : 'file';
+        if (!qText && (qIsImage || qAllAtts.length > 0)) {
+          qText = qAllAtts.map(a => `[${qKind}${a?.file_name ? ': ' + a.file_name : ''}]`).join(' ') || `[${qKind}]`;
+        }
+        for (const qAtt of qAllAtts) {
+          const qMediaId = qAtt?.artifact_id;
+          if (!qMediaId) continue;
           try {
             const { url } = await getMediaUrl(qMediaId, orgConfig.org_id);
             if (url) {
-              const qPath = await downloadMedia(url, qAtt?.file_name || qMediaId);
-              if (qPath) qText += ` ---- ${qIsImage ? 'image' : 'file'}: ${qPath}`;
+              const qOrigName = qAtt?.file_name;
+              const qExt = qOrigName ? path.extname(qOrigName) : '';
+              const qSaveName = qMediaId + qExt;
+              const qPath = await downloadMedia(url, qSaveName);
+              if (qPath) {
+                qText += ` ---- ${qKind}: ${qPath}`;
+                if (qOrigName) qText += ` name="${qOrigName}"`;
+              }
             }
           } catch (e) {
-            warn('quoted media fetch failed:', e.message);
+            warn('quoted media fetch failed:', qMediaId, e.message);
           }
         }
         const qSenderId = q.message?.sender_id;
@@ -784,18 +939,13 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       }
     }
 
-    // Build a human-readable media label for the message body so an image/file
-    // message isn't delivered as an empty `said:`. Mirrors other C4 channels:
-    // the body carries `[image]` / `[file: name]` (plus any caption), while the
-    // `---- <kind>: <path>` suffix (emitted by formatInboundForC4) still gives
-    // the agent the local path when it needs to process the media.
     const isImage = msgType === 'image' || msgType === 'agent_card';
-    const isFile = !isImage && !!mediaId;
+    const isFile = !isImage && mediaItems.length > 0;
     let displayContent = text;
-    if (isImage) {
-      displayContent = `[image]${text ? ' ' + text : ''}`;
-    } else if (isFile) {
-      displayContent = `[file${mediaFileName ? ': ' + mediaFileName : ''}]${text ? ' ' + text : ''}`;
+    if (isImage || isFile) {
+      const kind = isImage ? 'image' : 'file';
+      const labels = mediaItems.map(it => `[${kind}${it.fileName ? ': ' + it.fileName : ''}]`);
+      displayContent = labels.join(' ') + (text ? ' ' + text : '');
     }
 
     const body = formatInboundForC4(
@@ -804,7 +954,7 @@ function makeOrgMessageHandler(orgConfig, sessionRef) {
       {
         content: displayContent,
         type: isImage ? 'image' : (isFile ? 'file' : 'text'),
-        mediaLocalPath,
+        mediaItems,
       },
       recent,
       { groupName, smartHint, quotedContent, enforceSkillFlow: config.message?.enforceSkillFlow ?? true, orgId: orgConfig.org_id, orgName: orgConfig.org_name },
@@ -1107,6 +1257,23 @@ async function handleSystemEvent(orgConfig, frame) {
 
   const orgId = orgConfig.org_id;
   const actorId = data.recalled_by || data.edited_by || data.sender_id || '';
+
+  // Resolve conversation type and apply the same policy check as regular
+  // messages. Without this, edit/recall events from groups not in the
+  // allowlist would bypass shouldHandleMessage and reach the agent.
+  const conv = await fetchConversation(orgId, conversationId);
+  const convType = (conv?.type || '').toLowerCase() || 'dm';
+  const syntheticMsg = {
+    conversation_id: conversationId,
+    sender_id: actorId,
+    sender_type: data.sender_type || 'HUMAN',
+  };
+  const decision = await shouldHandleMessage(syntheticMsg, conv || {}, orgConfig);
+  if (!decision.handle) {
+    log(`drop [${orgConfig.slug}] system ${kind} msg=${messageId}: ${decision.reason}`);
+    return;
+  }
+
   const actorName = (await fetchMemberName(orgId, actorId)) || actorId || '对方';
 
   let notice;
@@ -1120,7 +1287,6 @@ async function handleSystemEvent(orgConfig, frame) {
       ? `[Message Recalled] Do not act on it. (Original: ${originalText})`
       : `[Message Recalled] A message was recalled. Do not act on it.`;
   } else {
-    // Edit: fetch the updated message to get the new full content.
     let newText = '';
     if (messageId) {
       const detail = await fetchMessageDetail(orgId, conversationId, messageId);
@@ -1137,12 +1303,10 @@ async function handleSystemEvent(orgConfig, frame) {
       : `[Message Edited] A message was edited. Use the latest content.`;
   }
 
-  // Inject as a standalone inbound notice (no skill-flow directive — this is a
-  // system event, not a user task). conv type defaults to dm; the endpoint is
-  // keyed by conversationId so routing is correct regardless of dm/group.
-  const endpoint = formatEndpoint({ type: 'dm', conversationId });
+  const convName = conv?.name || conv?.display_name || '';
+  const endpoint = formatEndpoint({ type: convType, conversationId });
   const body = formatInboundForC4(
-    { type: 'dm', id: conversationId },
+    { type: convType, id: conversationId, name: convName },
     { displayName: actorName },
     { content: notice, type: 'text' },
     [],

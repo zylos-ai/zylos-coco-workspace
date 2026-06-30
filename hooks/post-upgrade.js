@@ -1,286 +1,211 @@
 #!/usr/bin/env node
 
 /**
- * Post-upgrade hook for zylos-coco-workspace.
+ * Post-upgrade hook for zylos-coco-workspace v1.0.79 (final release).
  *
- * Handles the v0.3 → v0.4 (multi-org) schema migration:
- *   - top-level `workspace_id`                  → DROPPED
- *   - top-level `org_id`                        → orgs.default.org_id
- *   - top-level `device_id` / `app_version`     → agent.*
- *   - top-level `client_id` (any location)      → DROPPED (dead field)
- *   - top-level `comm.*`                        → server.* (subset)
- *       comm.core_url   → server.bff_url
- *       comm.ws_url     → server.ws_url
- *       comm.reconnect_max_delay / heartbeat_interval → server.*
- *       comm.platform                           → DROPPED (dead field)
- *       comm.kb_url / comm.as_url               → DROPPED (cws-core is the
- *                                                  gateway; agent does not
- *                                                  talk to kb/as directly)
- *   - top-level `agent.identity_id` / `api_key` — preserved (still global)
- *   - new top-level `orgs.<slug>`               — wraps the legacy single-org
- *                                                 settings into `orgs.default`
+ * Migrates coco-workspace → openmax:
+ *   1. Installs zylos-openmax from GitHub
+ *   2. Copies config and runtime data
+ *   3. Switches PM2 service
+ *   4. Updates components.json and registry.json
  *
- * After migration the operator must:
- *   1. Verify `orgs.<slug>.self.member_id` (was not in v0.3 schema — set
- *      to the agent's member_id within this org, or run a /me probe).
- *   2. Configure `orgs.<slug>.access` (dmPolicy / groupPolicy / groups{}).
- *
- * The hook is idempotent: re-running on an already-migrated config is a no-op.
+ * Idempotent: re-running when openmax is already installed is a no-op.
  */
 
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 
 const HOME = process.env.HOME;
-const CONFIG_PATH = path.join(HOME, 'zylos/components/coco-workspace/config.json');
+const SKILLS_DIR = path.join(HOME, 'zylos/.claude/skills');
+const COMPONENTS_DIR = path.join(HOME, 'zylos/components');
+const ZYLOS_DIR = path.join(HOME, 'zylos/.zylos');
+const COMPONENTS_FILE = path.join(ZYLOS_DIR, 'components.json');
+const REGISTRY_FILE = path.join(ZYLOS_DIR, 'registry.json');
 
-let raw = '';
+const OLD_NAME = 'coco-workspace';
+const NEW_NAME = 'openmax';
+const NEW_REPO = 'zylos-ai/zylos-openmax';
+const NEW_TAG = 'v2.0.0';
+
+const oldSkillDir = path.join(SKILLS_DIR, OLD_NAME);
+const newSkillDir = path.join(SKILLS_DIR, NEW_NAME);
+const oldDataDir = path.join(COMPONENTS_DIR, OLD_NAME);
+const newDataDir = path.join(COMPONENTS_DIR, NEW_NAME);
+
+function log(msg) { console.log(`[migrate] ${msg}`); }
+function warn(msg) { console.log(`[migrate] ⚠ ${msg}`); }
+
+// ── Check if already migrated ──────────────────────────────────────────────
+if (fs.existsSync(newSkillDir) && fs.existsSync(path.join(newSkillDir, 'SKILL.md'))) {
+  log('openmax is already installed — skipping migration.');
+  process.exit(0);
+}
+
+log('Migrating coco-workspace → openmax...');
+
+// ── Step 1: Clone zylos-openmax ────────────────────────────────────────────
+log('Step 1/6: Downloading openmax...');
 try {
-  raw = fs.readFileSync(CONFIG_PATH, 'utf8');
+  if (fs.existsSync(newSkillDir)) fs.rmSync(newSkillDir, { recursive: true });
+  execSync(
+    `git clone --depth 1 --branch ${NEW_TAG} https://github.com/${NEW_REPO}.git "${newSkillDir}"`,
+    { stdio: 'pipe', timeout: 120000 }
+  );
+  // Remove .git to save space — this is an installed component, not a dev checkout
+  fs.rmSync(path.join(newSkillDir, '.git'), { recursive: true, force: true });
+  log('  Download complete.');
 } catch (e) {
-  console.error(`[post-upgrade] failed to read ${CONFIG_PATH}: ${e.message}`);
+  warn(`Failed to clone openmax: ${e.message}`);
+  warn('Migration aborted. You can install manually: zylos add zylos-ai/zylos-openmax');
   process.exit(1);
 }
 
-let config;
+// ── Step 2: npm install ────────────────────────────────────────────────────
+log('Step 2/6: Installing dependencies...');
 try {
-  config = JSON.parse(raw);
+  execSync('npm install --omit=dev', {
+    cwd: newSkillDir,
+    stdio: 'pipe',
+    timeout: 300000,
+  });
+  log('  Dependencies installed.');
 } catch (e) {
-  console.error(`[post-upgrade] config.json is not valid JSON: ${e.message}`);
+  warn(`npm install failed: ${e.message}`);
+  warn('Migration aborted. You can install manually: zylos add zylos-ai/zylos-openmax');
+  fs.rmSync(newSkillDir, { recursive: true, force: true });
   process.exit(1);
 }
 
-const legacyKeysSeen = [];
+// ── Step 3: Create data directory and copy preserved files ─────────────────
+log('Step 3/6: Migrating data...');
+fs.mkdirSync(newDataDir, { recursive: true });
 
-// ── server.* ────────────────────────────────────────────────────────────────
-if (!config.server) config.server = {};
-if (config.comm) {
-  const m = config.comm;
-  const map = {
-    bff_url: m.core_url || m.api_url,
-    ws_url:  m.ws_url,
-    reconnect_max_delay: m.reconnect_max_delay,
-    heartbeat_interval:  m.heartbeat_interval,
-    // m.platform intentionally not migrated — `server.platform` was never
-    // read by runtime code; it's a dead field.
-  };
-  for (const [k, v] of Object.entries(map)) {
-    if (v !== undefined && config.server[k] === undefined) config.server[k] = v;
-  }
-  if (m.kb_url !== undefined || m.as_url !== undefined) {
-    legacyKeysSeen.push('comm.kb_url / comm.as_url (dropped — cws-core is the gateway)');
-  }
-  if (m.platform !== undefined) {
-    legacyKeysSeen.push('comm.platform (dropped — never read by runtime)');
-  }
-  legacyKeysSeen.push('comm.* → server.* (kb/as dropped)');
-  delete config.comm;
-}
-
-// Strip server.platform if a previous migration carried it over — it's dead.
-if (config.server && config.server.platform !== undefined) {
-  delete config.server.platform;
-  legacyKeysSeen.push('server.platform (dropped — never read by runtime)');
-}
-
-// Existing v0.4-shape configs that already migrated but kept server.kb_url /
-// server.as_url around: drop them now since they're unused.
-if (config.server) {
-  let strippedKb = false;
-  if (config.server.kb_url !== undefined) { delete config.server.kb_url; strippedKb = true; }
-  if (config.server.as_url !== undefined) { delete config.server.as_url; strippedKb = true; }
-  if (strippedKb) legacyKeysSeen.push('server.kb_url / server.as_url (dropped — unused)');
-}
-
-// ── agent.{device_id, app_version} ──────────────────────────────────────────
-// Hoist legacy top-level fields under `agent.*` (where the runtime now reads).
-// `client_id` used to be hoisted too; the field is dead and is stripped below.
-if (!config.agent) config.agent = {};
-for (const k of ['device_id', 'app_version']) {
-  if (config[k] !== undefined) {
-    if (config.agent[k] === undefined) config.agent[k] = config[k];
-    legacyKeysSeen.push(k);
-    delete config[k];
-  }
-}
-// Top-level client_id (very old): drop.
-if (config.client_id !== undefined) {
-  delete config.client_id;
-  legacyKeysSeen.push('client_id (top-level dropped — never read by runtime)');
-}
-// agent.client_id (any prior version): drop.
-if (config.agent.client_id !== undefined) {
-  delete config.agent.client_id;
-  legacyKeysSeen.push('agent.client_id (dropped — never read by runtime)');
-}
-
-// ── orgs.default from legacy top-level org_id ───────────────────────────────
-if (!config.orgs) config.orgs = {};
-if (config.org_id) {
-  if (!config.orgs.default) {
-    config.orgs.default = {
-      enabled: true,
-      org_id: config.org_id,
-      org_name: '',
-      self:  { member_id: '', name: 'Zylos' },   // ← operator must fill in member_id
-      owner: { member_id: '', name: '' },        // empty member_id = unbound
-      access: {
-        dmPolicy:    'owner',
-        dmAllowFrom: [],
-        groupPolicy: 'allowlist',
-        groups:      {},
-      },
-    };
-  }
-  legacyKeysSeen.push('org_id');
-  delete config.org_id;
-}
-
-// ── per-org schema: flat member_id/display_name → self.{member_id,name},
-//                   owner.bound flag → derived from owner.member_id ─────────
-//
-// Earlier v0.4 configs (pre-self refactor) stored the agent's per-org
-// identity flat on the org block and tracked owner-binding via a separate
-// `bound` boolean. The current schema groups identity under `self` and
-// derives bound state from `owner.member_id` being non-empty.
-for (const [slug, org] of Object.entries(config.orgs)) {
-  if (!org || typeof org !== 'object') continue;
-  let touched = false;
-
-  // member_id + display_name → self.{member_id, name}
-  if (org.member_id !== undefined || org.display_name !== undefined) {
-    const memberId = org.member_id || org.self?.member_id || '';
-    const name     = org.display_name || org.self?.name || 'Zylos';
-    org.self = { member_id: memberId, name };
-    delete org.member_id;
-    delete org.display_name;
-    touched = true;
-  } else if (!org.self) {
-    org.self = { member_id: '', name: 'Zylos' };
-    touched = true;
-  }
-
-  // owner.bound → strip (state now derived from owner.member_id)
-  if (org.owner && org.owner.bound !== undefined) {
-    delete org.owner.bound;
-    touched = true;
-  }
-  if (!org.owner) {
-    org.owner = { member_id: '', name: '' };
-    touched = true;
-  }
-
-  if (touched) legacyKeysSeen.push(`orgs.${slug}: member_id/display_name → self.*, owner.bound dropped`);
-}
-
-// ── orgs key normalisation: old-style slug → full org_id ────────────────────
-//
-// Earlier versions used human-readable slugs as keys (e.g. "org-019ea63a",
-// "coco-test2", "default"). The canonical key is now the full org_id UUID.
-// Rename any entry whose key does not match its own org_id.
-{
-  const renames = [];
-  for (const [slug, org] of Object.entries(config.orgs)) {
-    if (!org || typeof org !== 'object' || !org.org_id) continue;
-    if (slug !== org.org_id) renames.push([slug, org.org_id]);
-  }
-  for (const [oldKey, newKey] of renames) {
-    if (config.orgs[newKey]) {
-      legacyKeysSeen.push(`orgs.${oldKey}: skipped rename → ${newKey} (key already exists)`);
-      continue;
-    }
-    config.orgs[newKey] = config.orgs[oldKey];
-    delete config.orgs[oldKey];
-    legacyKeysSeen.push(`orgs.${oldKey} → orgs.${newKey} (key normalised to full org_id)`);
-  }
-}
-
-// ── drop workspace_id entirely ──────────────────────────────────────────────
-if (config.workspace_id !== undefined) {
-  legacyKeysSeen.push('workspace_id (dropped — no replacement)');
-  delete config.workspace_id;
-}
-
-// ── agent.id (legacy alias for identity_id) → identity_id ──────────────────
-if (config.agent.id && !config.agent.identity_id) {
-  config.agent.identity_id = config.agent.id;
-  legacyKeysSeen.push('agent.id → agent.identity_id');
-}
-if (config.agent.id !== undefined) {
-  delete config.agent.id;
-}
-// agent.participant_id was vestigial; drop if empty.
-if (config.agent.participant_id === '' || config.agent.participant_id === undefined) {
-  delete config.agent.participant_id;
-}
-
-// ── org_name resolution from API ────────────────────────────────────────────
-//
-// Fetch real org names from cws-core for every enabled org. Overwrites any
-// stale or concatenated org_name with the server's canonical name. Best-effort:
-// network failures are logged but never block the upgrade.
-
-if (config.agent?.api_key && config.server?.bff_url) {
-  const bffUrl = config.server.bff_url.replace(/\/$/, '');
-  const apiKey = config.agent.api_key;
-  const cfH = {};
-  if (config.cf_access?.client_id) {
-    cfH['CF-Access-Client-Id'] = config.cf_access.client_id;
-    cfH['CF-Access-Client-Secret'] = config.cf_access.client_secret;
-  }
-
-  for (const [key, org] of Object.entries(config.orgs)) {
-    if (!org?.org_id) continue;
+const preserveFiles = ['config.json', 'mention-registry.json', 'smoke-config.json'];
+for (const f of preserveFiles) {
+  const src = path.join(oldDataDir, f);
+  const dst = path.join(newDataDir, f);
+  if (fs.existsSync(src)) {
     try {
-      const tokenRes = await fetch(`${bffUrl}/auth/agent/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, ...cfH },
-        body: JSON.stringify({ org_id: org.org_id }),
-      });
-      if (!tokenRes.ok) { console.log(`[post-upgrade] token exchange for ${org.org_id}: HTTP ${tokenRes.status}, skip`); continue; }
-      const jwt = (await tokenRes.json())?.data?.access_token;
-      if (!jwt) continue;
-
-      const orgRes = await fetch(`${bffUrl}/api/v1/organizations/${org.org_id}`, {
-        headers: { Authorization: `Bearer ${jwt}`, ...cfH },
-      });
-      if (!orgRes.ok) continue;
-      const realName = (await orgRes.json())?.data?.name;
-      if (realName && realName !== org.org_name) {
-        const old = org.org_name || '(empty)';
-        org.org_name = realName;
-        legacyKeysSeen.push(`orgs.${key}.org_name: "${old}" → "${realName}" (from API)`);
-      }
+      fs.copyFileSync(src, dst);
+      log(`  Copied ${f}`);
     } catch (e) {
-      console.log(`[post-upgrade] org_name fetch for ${org.org_id}: ${e.message}`);
+      warn(`  Failed to copy ${f}: ${e.message}`);
     }
   }
 }
 
-// ── write back if anything changed ──────────────────────────────────────────
-if (legacyKeysSeen.length > 0) {
-  const tmp = `${CONFIG_PATH}.tmp.${process.pid}.${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n');
-  fs.renameSync(tmp, CONFIG_PATH);
-
-  console.log('[post-upgrade] config.json migrated to multi-org schema (v0.4).');
-  console.log('  Legacy fields migrated:');
-  for (const k of legacyKeysSeen) console.log(`    - ${k}`);
-  console.log('');
-  console.log('  ⚠ ACTION REQUIRED — edit ' + CONFIG_PATH);
-  console.log('    1. orgs.<slug>.self.member_id — set to this agent\'s member id within each org');
-  console.log('       (look it up via cws-core /me, or call POST /orgs/{org_id}/members/me).');
-  console.log('    2. orgs.<slug>.access — configure the policy:');
-  console.log('       - dmPolicy: "open" | "allowlist" | "owner"');
-  console.log('       - dmAllowFrom: [] (used when dmPolicy=allowlist)');
-  console.log('       - groupPolicy: "open" | "allowlist" | "disabled"');
-  console.log('       - groups: { "<conv-uuid>": { name, mode: "mention"|"smart", allowFrom: ["*"] } }');
-  console.log('    3. To add MORE orgs, copy `orgs.default` to `orgs.<slug>`, fill in org_id and');
-  console.log('       self.member_id for that org. Each enabled org gets its own WebSocket connection.');
-  console.log('    4. orgs.<slug>.owner — set on first DM under dmPolicy=owner (auto-bind);');
-  console.log('       empty owner.member_id == unbound.');
-  console.log('');
-  console.log('  Service must be restarted after editing:  pm2 restart zylos-coco-workspace');
-} else {
-  console.log('[post-upgrade] config.json already on multi-org schema — nothing to migrate.');
+const preserveDirs = ['runtime', 'media', 'logs'];
+for (const d of preserveDirs) {
+  const src = path.join(oldDataDir, d);
+  const dst = path.join(newDataDir, d);
+  if (fs.existsSync(src)) {
+    try {
+      execSync(`cp -a "${src}" "${dst}"`, { stdio: 'pipe' });
+      log(`  Copied ${d}/`);
+    } catch (e) {
+      warn(`  Failed to copy ${d}/: ${e.message}`);
+    }
+  }
 }
+
+// ── Step 4: Update components.json ─────────────────────────────────────────
+log('Step 4/6: Updating component registry...');
+try {
+  let components = {};
+  if (fs.existsSync(COMPONENTS_FILE)) {
+    components = JSON.parse(fs.readFileSync(COMPONENTS_FILE, 'utf8'));
+  }
+
+  // Add openmax entry
+  components[NEW_NAME] = {
+    version: '2.0.0',
+    repo: NEW_REPO,
+    type: 'declarative',
+    isThirdParty: false,
+    installedAt: new Date().toISOString(),
+    skillDir: newSkillDir,
+    dataDir: newDataDir,
+    migratedFrom: OLD_NAME,
+  };
+
+  // Remove old entry
+  delete components[OLD_NAME];
+
+  fs.writeFileSync(COMPONENTS_FILE, JSON.stringify(components, null, 2));
+  log('  components.json updated.');
+} catch (e) {
+  warn(`Failed to update components.json: ${e.message}`);
+}
+
+// Update registry.json
+try {
+  let registry = { components: {} };
+  if (fs.existsSync(REGISTRY_FILE)) {
+    registry = JSON.parse(fs.readFileSync(REGISTRY_FILE, 'utf8'));
+  }
+
+  registry.components[NEW_NAME] = {
+    repo: NEW_REPO,
+    description: 'OpenMax native communication + service CLIs for Zylos agents',
+    type: 'communication',
+    official: true,
+  };
+  delete registry.components[OLD_NAME];
+
+  fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2));
+  log('  registry.json updated.');
+} catch (e) {
+  warn(`Failed to update registry.json: ${e.message}`);
+}
+
+// ── Step 5: Switch PM2 service ─────────────────────────────────────────────
+log('Step 5/6: Switching service...');
+
+// Stop old service
+try {
+  execSync('pm2 stop zylos-coco-workspace 2>/dev/null; pm2 delete zylos-coco-workspace 2>/dev/null', {
+    stdio: 'pipe',
+    shell: true,
+  });
+  log('  Stopped zylos-coco-workspace.');
+} catch {
+  // Service might not be running
+}
+
+// Start new service
+try {
+  const ecoConfig = path.join(newSkillDir, 'ecosystem.config.cjs');
+  if (fs.existsSync(ecoConfig)) {
+    execSync(`pm2 start "${ecoConfig}"`, { stdio: 'pipe' });
+    execSync('pm2 save', { stdio: 'pipe' });
+    log('  Started zylos-openmax.');
+  } else {
+    warn('  ecosystem.config.cjs not found — start the service manually.');
+  }
+} catch (e) {
+  warn(`  Failed to start zylos-openmax: ${e.message}`);
+  warn('  Start manually: pm2 start ~/zylos/.claude/skills/openmax/ecosystem.config.cjs');
+}
+
+// ── Step 6: Clean up old skill directory ───────────────────────────────────
+log('Step 6/6: Cleanup...');
+// Don't remove the old data dir (config might be referenced as backup)
+// The old skill dir will contain the v1.0.79 code — leave it as a breadcrumb
+// Users can run `zylos uninstall coco-workspace --purge` to fully clean up
+log('  Old data preserved at ~/zylos/components/coco-workspace/ (safe to remove).');
+log('  Old skill preserved at ~/.claude/skills/coco-workspace/ (safe to remove).');
+
+// ── Done ───────────────────────────────────────────────────────────────────
+console.log('');
+console.log('  ✓ Migration complete: coco-workspace → openmax');
+console.log('');
+console.log('  New component: openmax v2.0.0');
+console.log('  Service:       pm2 zylos-openmax');
+console.log('  Config:        ~/zylos/components/openmax/config.json');
+console.log('  Upgrade:       zylos upgrade openmax');
+console.log('');
+console.log('  Old files preserved for reference (safe to remove):');
+console.log('    ~/zylos/components/coco-workspace/');
+console.log('    ~/.claude/skills/coco-workspace/');
+console.log('');

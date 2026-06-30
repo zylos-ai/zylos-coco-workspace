@@ -188,13 +188,41 @@ try {
   warn('  Start manually: pm2 start ~/zylos/.claude/skills/openmax/ecosystem.config.cjs');
 }
 
-// ── Step 6: Clean up old skill directory ───────────────────────────────────
-log('Step 6/6: Cleanup...');
-// Don't remove the old data dir (config might be referenced as backup)
-// The old skill dir will contain the v1.0.79 code — leave it as a breadcrumb
-// Users can run `zylos uninstall coco-workspace --purge` to fully clean up
-log('  Old data preserved at ~/zylos/components/coco-workspace/ (safe to remove).');
-log('  Old skill preserved at ~/.claude/skills/coco-workspace/ (safe to remove).');
+// ── Step 6: Archive old data and clean up ──────────────────────────────────
+log('Step 6/7: Archiving old data...');
+
+// Compress ~/zylos/components/coco-workspace/ → coco-workspace-backup.tar.gz
+if (fs.existsSync(oldDataDir)) {
+  try {
+    const archivePath = path.join(COMPONENTS_DIR, 'coco-workspace-backup.tar.gz');
+    execSync(`tar -czf "${archivePath}" -C "${COMPONENTS_DIR}" "${OLD_NAME}"`, {
+      stdio: 'pipe',
+      timeout: 60000,
+    });
+    log(`  Archived to ${archivePath}`);
+    fs.rmSync(oldDataDir, { recursive: true, force: true });
+    log('  Removed ~/zylos/components/coco-workspace/');
+  } catch (e) {
+    warn(`  Failed to archive old data: ${e.message}`);
+    warn('  Old data left in place — remove manually if needed.');
+  }
+} else {
+  log('  Old data directory not found — skipping.');
+}
+
+// ── Step 7: Remove old skill directory ────────────────────────────────────
+log('Step 7/7: Removing old skill...');
+
+if (fs.existsSync(oldSkillDir)) {
+  try {
+    fs.rmSync(oldSkillDir, { recursive: true, force: true });
+    log('  Removed ~/.claude/skills/coco-workspace/');
+  } catch (e) {
+    warn(`  Failed to remove old skill: ${e.message}`);
+  }
+} else {
+  log('  Old skill directory not found — skipping.');
+}
 
 // ── Done ───────────────────────────────────────────────────────────────────
 console.log('');
@@ -205,7 +233,5 @@ console.log('  Service:       pm2 zylos-openmax');
 console.log('  Config:        ~/zylos/components/openmax/config.json');
 console.log('  Upgrade:       zylos upgrade openmax');
 console.log('');
-console.log('  Old files preserved for reference (safe to remove):');
-console.log('    ~/zylos/components/coco-workspace/');
-console.log('    ~/.claude/skills/coco-workspace/');
+console.log('  Old data archived to ~/zylos/components/coco-workspace-backup.tar.gz');
 console.log('');

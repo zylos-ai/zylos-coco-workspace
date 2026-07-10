@@ -140,6 +140,7 @@ export const DEFAULT_CONFIG = {
 };
 
 let currentConfig = null;
+let _onConfigChange = null;
 
 function deepMerge(base, override) {
   if (!override || typeof override !== 'object' || Array.isArray(override)) return base;
@@ -225,6 +226,7 @@ export function updateConfig(mutate) {
   fs.writeFileSync(tmp, JSON.stringify(next, null, 2));
   fs.renameSync(tmp, CONFIG_PATH);
   currentConfig = next;
+  _onConfigChange?.(next);
   return next;
 }
 
@@ -275,23 +277,31 @@ export function updateOwnerName(orgSlug, displayName) {
 // =============================================================================
 
 export function watchConfig(onChange) {
+  _onConfigChange = onChange;
   let debounce = null;
   let watcher;
-  try {
-    watcher = fs.watch(CONFIG_PATH, () => {
-      clearTimeout(debounce);
-      debounce = setTimeout(() => {
-        currentConfig = null;
-        const config = loadConfig();
-        onChange?.(config);
-      }, 100);
-    });
-  } catch (err) {
-    console.warn(`[config] cannot watch ${CONFIG_PATH}: ${err.message} — hot reload disabled`);
-    return () => {};
+
+  function arm() {
+    try {
+      watcher = fs.watch(CONFIG_PATH, () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          watcher.close();
+          arm();
+          currentConfig = null;
+          const config = loadConfig();
+          onChange?.(config);
+        }, 100);
+      });
+    } catch (err) {
+      console.warn(`[config] cannot watch ${CONFIG_PATH}: ${err.message} — hot reload disabled`);
+    }
   }
+
+  arm();
   return () => {
+    _onConfigChange = null;
     clearTimeout(debounce);
-    watcher.close();
+    watcher?.close();
   };
 }
